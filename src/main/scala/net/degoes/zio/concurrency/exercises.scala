@@ -850,7 +850,7 @@ object zio_stm {
    * Using `TRef.make`, make an `STM` effect that creates a new `TRef`
    * initially set to 0.
    */
-  val make1: STM[Nothing, TRef[Int]] = ???
+  val make1: STM[Nothing, TRef[Int]] = TRef.make(0)
 
   /**
    * EXERCISE 2
@@ -858,7 +858,7 @@ object zio_stm {
    * Using `STM#commit`, "commit" the transaction that creates a new `TRef`
    * initially set to zero.
    */
-  val committed1: UIO[TRef[Int]] = make1 ?
+  val committed1: UIO[TRef[Int]] = make1.commit
 
   /**
    * EXERCISE 3
@@ -866,7 +866,7 @@ object zio_stm {
    * Using `TRef#update`, increment the specified `TRef` by 100, and then
    * commit that transaction using `STM#commit`.
    */
-  def increment1(ref: TRef[Int]): UIO[Int] = ???
+  def increment1(ref: TRef[Int]): UIO[Int] = ref.update( _ + 100).commit
 
   /**
    * EXERCISE 4
@@ -874,7 +874,7 @@ object zio_stm {
    * Using `STM.fail`, construct an `STM` representing failure with the string
    * "Uh oh".
    */
-  val failure1: STM[String, Nothing] = ???
+  val failure1: STM[String, Nothing] = STM.fail("Error")
 
   /**
    * EXERCISE 5
@@ -884,7 +884,15 @@ object zio_stm {
    * have enough money, then fail with a string error message.
    */
   def transfer1(from: TRef[Int], to: TRef[Int], howMuch: Int): STM[String, Unit] =
-    ???
+    for {
+      b <- from.get
+      _ <- if(b < howMuch) STM.fail("Not enough money") else STM.unit
+      _ <- from.update(_ - howMuch)
+      _ <- to.update(_ + howMuch)
+    } yield ()
+
+  def transfer1B(from: TRef[Int], to: TRef[Int], howMuch: Int): STM[String, Unit] =
+      from.get *> from.update(_ - howMuch) *> to.update(_ + howMuch) *> STM.unit
 
   /**
    * EXERCISE 6
@@ -894,7 +902,12 @@ object zio_stm {
    * until later (when more funds are available) using `STM.retry`.
    */
   def transfer2(from: TRef[Int], to: TRef[Int], howMuch: Int): STM[Nothing, Unit] =
-    ???
+    for {
+      b <- from.get
+      _ <- if( b < howMuch ) STM.retry else STM.unit
+      _ <- from.update( _ - howMuch )
+      _ <- to.update( _ + howMuch )
+    } yield ()
 
   /**
    * EXERCISE 7
@@ -904,7 +917,13 @@ object zio_stm {
    * method that interrnally uses `STM.retry`.
    */
   def transfer3(from: TRef[Int], to: TRef[Int], howMuch: Int): STM[Nothing, Unit] =
-    ???
+    for {
+      b <- from.get
+      _ <- STM.check( b >= howMuch )
+      _ <- from.update( _ - howMuch )
+      _ <- to.update( _ + howMuch )
+    } yield ()
+
 
   /**
    * EXERCISE 8
@@ -914,7 +933,12 @@ object zio_stm {
    * the check on the balance of the "from" account.
    */
   def transfer4(from: TRef[Int], to: TRef[Int], howMuch: Int): STM[Nothing, Unit] =
-    ???
+    for {
+      b <- from.get.filter(_ >= howMuch)
+      _ <- from.update(_ - howMuch)
+      _ <- to.update(_ + howMuch)
+    } yield ()
+
 
   /**
    * EXERCISE 9
@@ -924,7 +948,7 @@ object zio_stm {
    * from Tom to Sarah.
    */
   def orElseExample(bob: TRef[Int], sarah: TRef[Int], tom: TRef[Int]): STM[Nothing, Unit] =
-    ???
+    transfer2(bob, sarah, 100) orElse transfer2(tom, sarah, 100)
 
   /**
    * EXERCISE 10
@@ -933,9 +957,19 @@ object zio_stm {
    * `unlock` methods.
    */
   class Lock(value: TRef[Boolean]) {
-    def lock: STM[Nothing, Unit] = ???
+    def lock: STM[Nothing, Unit] =
+      for {
+        v <- value.get
+        _ <- STM.check(!v)
+        _ <- value.set(true)
+      } yield ()
 
-    def unlock: STM[Nothing, Unit] = ???
+    def unlock: STM[Nothing, Unit] =
+      for {
+        v <- value.get
+        _ <- if(!v) STM.dieMessage("Unlock not paired with lock") else STM.unit
+        _ <- value.set(false)
+      } yield ()
   }
   object Lock {
     def make: STM[Nothing, Lock] = TRef.make(false).map(r => new Lock(r))
@@ -947,13 +981,46 @@ object zio_stm {
    * Using `ZIO#descriptor` and the `FiberId` inside the descriptor, implement
    * a "fiber reentrant" lock.
    */
-  class ReentrantLock(value: TRef[Option[FiberId]]) {
-    def lock: UIO[Unit] = ???
+  class ReentrantLock(value: TRef[Option[(FiberId, Int)]]) {
+    def lock: UIO[Unit] =
+      ZIO.descriptor.flatMap { descriptor =>
+        val fiberId = descriptor.id
 
-    def unlock: UIO[Boolean] = ???
+        (for {
+
+        option <- value.get
+        newV   <- option match {
+          case None => STM.succeed(Some(fiberId, 1))
+          case Some((id, count)) if id == fiberId => STM.succeed(Some((id, count + 1)))
+          case _ => STM.retry
+        }
+        _      <- value.set(newV)
+
+        } yield ()).commit
+     }
+
+    def unlock: UIO[Unit] =
+      ZIO.descriptor.flatMap { descriptor =>
+        val fiberId = descriptor.id
+
+        (for {
+
+          option <- value.get
+          newV   <- option match {
+            case None => STM.succeed(Some(fiberId, 1))
+            case Some((id, count)) if id == fiberId => val newCount = count - 1
+                                                       if(newCount == 0) STM.succeed(None)
+                                                       else STM.succeed(Some((id, newCount)))
+            case _ => STM.dieMessage("Someone trying to unlock something it has no locks for")
+          }
+          _      <- value.set(newV)
+
+        } yield ()).commit
+      }
+
   }
   object ReentrantLock {
-    def make: UIO[ReentrantLock] = TRef.make(Option.empty[FiberId]).map(r => new ReentrantLock(r)).commit
+    def make: UIO[ReentrantLock] = TRef.make(Option.empty[(FiberId, Int)]).map(r => new ReentrantLock(r)).commit
   }
 
   /**
@@ -962,16 +1029,30 @@ object zio_stm {
    * Implement `TArray`, a transactional array.
    */
   class TArray[A] private (val array: Array[TRef[A]]) extends AnyVal {
-    final def set(i: Int, v: A): STM[Nothing, Unit] = ???
+    final def set(i: Int, v: A): STM[Nothing, Unit] =
+      STM.suspend {
+        array(i).set(v)
+      }
 
-    final def get(i: Int): STM[Nothing, A] = ???
+    final def get(i: Int): STM[Nothing, A] =
+      STM.suspend {
+        array(i).get
+      }
 
-    final def update(i: Int, f: A => A): STM[Nothing, A] = ???
+    final def update(i: Int, f: A => A): STM[Nothing, A] =
+      STM.suspend {
+        array(i).update(f)
+      }
 
-    final def modify[B](i: Int, f: A => (B, A)): STM[Nothing, B] = ???
+    final def modify[B](i: Int, f: A => (B, A)): STM[Nothing, B] =
+      STM.suspend {
+        array(i).modify(f)
+      }
   }
   object TArray {
-    def make[A](n: Int): STM[Nothing, TArray[A]] = ???
+    def make[A](n: Int): STM[Nothing, TArray[A]] = STM.succeedLazy(
+      new TArray(Array.ofDim[TRef[A]](n))
+    )
   }
 
   /**
@@ -989,6 +1070,7 @@ object zio_stm {
     def modify[B](k: K, f: V => (B, V)): STM[Nothing, B] = ???
   }
   object TMap {
-    def make[K, V](load: Int = 16): STM[Nothing, TMap[K, V]] = ???
+    def make[K, V](load: Int = 16): STM[Nothing, TMap[K, V]] =
+      ???
   }
 }

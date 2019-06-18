@@ -8,8 +8,8 @@ import scalaz.zio.blocking.Blocking
 import scalaz.zio.console._
 import scalaz.zio.duration.Duration
 import scalaz.zio.random.Random
-
 import java.io.IOException
+import java.util.concurrent.TimeUnit
 
 object circuit_breaker extends App {
 
@@ -35,7 +35,14 @@ object hangman extends App {
    * Create a hangman game that requires the capability to perform `Console` and
    * `Random` effects.
    */
-  lazy val myGame: ZIO[Console with Random, IOException, Unit] = ???
+  lazy val myGame: ZIO[Console with Random, IOException, Unit] = for {
+    word   <- chooseWord
+    _      <- putStrLn("Welcome to Functional Hangman")
+    name   <- getName
+    state   = State(name, Set(), word)
+    _      <- renderState(state)
+    _      <- gameLoop(state)
+  } yield ()
 
   case class State(name: String, guesses: Set[Char], word: String) {
     def failures: Int = (guesses -- word.toSet).size
@@ -43,13 +50,43 @@ object hangman extends App {
     def playerLost: Boolean = failures > 10
 
     def playerWon: Boolean = (word.toSet -- guesses).isEmpty
+
+    def addChar(char: Char): State = copy(guesses = guesses + char)
   }
+
+  sealed trait GuessResult
+  object GuessResult {
+    final case object Won       extends GuessResult
+    final case object Lost      extends GuessResult
+    final case object Correct   extends GuessResult
+    final case object Incorrect extends GuessResult
+    final case object Unchanged extends GuessResult
+  }
+
+  def guessResult(oldState: State, newState: State, char: Char): GuessResult =
+    if(newState.playerWon) GuessResult.Won
+    else if(newState.playerLost) GuessResult.Lost
+    else if(oldState.guesses.contains(char)) GuessResult.Unchanged
+    else if (oldState.word.contains(char)) GuessResult.Correct
+    else GuessResult.Incorrect
 
   /**
    * Implement the main game loop, which gets choices from the user until
    * the game is won or lost.
    */
-  def gameLoop(state0: State): ZIO[Console, IOException, Unit] = ???
+  def gameLoop(state0: State): ZIO[Console, IOException, Unit] = for {
+    char   <- getChoice
+    state  =  state0.addChar(char)
+    _      <- renderState(state)
+    cont   <- guessResult(state0, state, char) match {
+      case GuessResult.Won       => putStrLn(s"Hey ${state.name}, you've won!").const(false)
+      case GuessResult.Lost      => putStrLn(s"I'm sorry ${state.name}. You lost :(").const(false)
+      case GuessResult.Correct   => putStrLn(s"Good guess ${state.name}! Keep going!").const(true)
+      case GuessResult.Incorrect => putStrLn(s"Bad guess ${state.name}! Keep going!").const(true)
+      case GuessResult.Unchanged => putStrLn(s"You're a tricky fella ${state.name}! You've already guessed this one!").const(true)
+    }
+    _      <- if (cont) gameLoop(state) else ZIO.unit
+  } yield ()
 
   def renderState(state: State): ZIO[Console, Nothing, Unit] = {
 
@@ -77,18 +114,25 @@ object hangman extends App {
    * Implement an effect that gets a single, lower-case character from
    * the user.
    */
-  lazy val getChoice: ZIO[Console, IOException, Char] = ???
+  lazy val getChoice: ZIO[Console, IOException, Char] = putStrLn("Please enter a letter or digit: ") *>
+                                                        getStrLn.flatMap( string =>
+                                                          string.trim.toList match {
+                                                            case x :: Nil if x.isLetterOrDigit => ZIO.succeed(x)
+                                                            case _ => putStrLn("You did not enter a single character") *> getChoice
+                                                          }
+  )
 
   /**
    * Implement an effect that prompts the user for their name, and
    * returns it.
    */
-  lazy val getName: ZIO[Console, IOException, String] = ???
+  lazy val getName: ZIO[Console, IOException, String] = putStrLn("What's your name?") *> getStrLn
+
 
   /**
    * Implement an effect that chooses a random word from the dictionary.
    */
-  lazy val chooseWord: ZIO[Random, Nothing, String] = ???
+  lazy val chooseWord: ZIO[Random, Nothing, String] = random.nextInt(Dictionary.length).map(Dictionary.apply)
 
   val Dictionary = List(
     "aaron",
@@ -976,7 +1020,19 @@ object hangman extends App {
    * Implement the `runScenario` method according to its type. Hint: You
    * will have to use `provide` on `TestModule`.
    */
-  def runScenario(testData: TestData): IO[IOException, TestData] = ???
+  def runScenario(testData: TestData): IO[IOException, TestData] = for {
+    ref   <- Ref.make(testData)
+    _     <- myGame.provide(TestModule(ref))
+    data  <- ref.get
+  } yield data
+
+  val scenario1: TestData = TestData(
+    output   = Nil,
+    input    = "Mariano" :: "a" :: "r" :: "o" :: "n" :: Nil,
+    integers = 0 :: Nil
+  )
+
+  lazy val testScenario1 = runScenario(scenario1).flatMap(testData => putStrLn(testData.render))
 
   case class TestData(
     output: List[String],
@@ -1011,52 +1067,95 @@ object hangman extends App {
 
   override def run(args: List[String]): ZIO[Environment, Nothing, Int] =
     myGame.fold(_ => 1, _ => 0)
+
+  def runTest(): ZIO[Environment, Nothing, Int] =
+    testScenario1.fold(_ => 1, _ => 0)
+
 }
 
 object parallel_web_crawler {
+  trait Web {
+    def web: Web.Service
+  }
+  object Web {
+    trait Service {
+      def getURL(url: URL): IO[Exception, String]
+    }
+    trait Live extends Web with Blocking {
+      val web = new Service {
+        /**
+          * EXERCISE 1
+          *
+          * Use the `effectBlocking` combinator to safely import the Scala `Source.fromURL`
+          * side-effect into a purely functional ZIO effect, using `refineOrDie` to narrow
+          * the `Throwable` error to `Exceptiono`.
+          */
+        def getURL(url: URL): IO[Exception, String] = {
+          // def effectBlocking[A](sideEffect: => A): ZIO[Blocking, Throwable, A]
+
+          def getURLImpl(url: URL): String =
+            scala.io.Source.fromURL(url.url)(scala.io.Codec.UTF8).mkString
+
+          blocking.effectBlocking(getURLImpl(url)).refineOrDie {
+            case e : Exception => e
+          }
+        }
+      }
+    }
+  }
 
   /**
-   *  Use the `effectBlocking` combinator to safely import the Scala `Source.fromURL`
-   * side-effect into a purely functional ZIO effect, using `refineOrDie` to narrow
-   * the `Throwable` error to `Exceptiono`.
-   */
-  def getURL(url: URL): ZIO[Blocking, Exception, String] = {
-    // def effectBlocking[A](sideEffect: => A): ZIO[Blocking, Throwable, A]
-    import scalaz.zio.blocking.effectBlocking
-
-    def getURLImpl(url: URL): String =
-      scala.io.Source.fromURL(url.url)(scala.io.Codec.UTF8).mkString
-
-    ???
-  }
+    * EXERCISE 2
+    *
+    * Using `ZIO.accessM`, delegate to the `Web` module's `getURL` function.
+    */
+  def getURL(url: URL): ZIO[Web, Exception, String] =
+    ZIO.accessM[Web](_.web.getURL(url))
 
   final case class CrawlState[+E](visited: Set[URL], errors: List[E]) {
-    def visitAll(urls: Set[URL]): CrawlState[E] = copy(visited = visited ++ urls)
+    final def visitAll(urls: Set[URL]): CrawlState[E] = copy(visited = visited ++ urls)
 
-    def logError[E1 >: E](e: E1): CrawlState[E1] = copy(errors = e :: errors)
+    final def logError[E1 >: E](e: E1): CrawlState[E1] = copy(errors = e :: errors)
   }
 
   /**
-   * Implement the `crawl` function using the helpers provided in this object.
-   * {{{
-   * def getURL(url: URL): ZIO[Blocking, Exception, String]
-   * def extractURLs(root: URL, html: String): List[URL]
-   * }}}
-   */
+    * EXERCISE 3
+    *
+    * Implement the `crawl` function using the helpers provided in this object.
+    *
+    * {{{
+    * def getURL(url: URL): ZIO[Blocking, Exception, String]
+    * def extractURLs(root: URL, html: String): List[URL]
+    * }}}
+    */
   def crawl[E](
-    seeds: Set[URL],
-    router: URL => Set[URL],
-    processor: (URL, String) => IO[E, Unit]
-  ): ZIO[Blocking, Nothing, List[E]] = {
-    def loop(seeds: Set[URL], ref: Ref[CrawlState[E]]): ZIO[Blocking, Nothing, Unit] =
-      ???
+                seeds: Set[URL],
+                router: URL => Set[URL],
+                processor: (URL, String) => IO[E, Unit]
+              ): ZIO[Web, Nothing, List[E]] = {
+    val emptySuccess = ZIO.succeed(Set[URL]())
 
-    ???
+    def loop(seeds: Set[URL], ref: Ref[CrawlState[E]]): ZIO[Web, Nothing, Unit] =
+      ZIO.foreachParN(100)(seeds) { url =>
+        getURL(url).flatMap { html =>
+          val urls = extractURLs(url, html).toSet.flatMap(router)
+
+          processor(url, html).catchAll(error => ref.update(_.logError(error)).unit).const(urls)
+        } orElse emptySuccess
+      }.map(_.toSet.flatten).flatMap(urls =>
+        ref.modify(state => (urls -- state.visited, state.visitAll(urls))).flatMap(loop(_, ref))
+      )
+
+    for {
+      ref   <- Ref.make(CrawlState(seeds, List.empty[E]))
+      _     <- loop(seeds, ref)
+      state <- ref.get
+    } yield state.errors
   }
 
   /**
-   * A data structure representing a structured URL, with a smart constructor.
-   */
+    * A data structure representing a structured URL, with a smart constructor.
+    */
   final case class URL private (parsed: io.lemonlabs.uri.Url) {
     import io.lemonlabs.uri._
 
@@ -1092,8 +1191,8 @@ object parallel_web_crawler {
   }
 
   /**
-   * A function that extracts URLs from a given web page.
-   */
+    * A function that extracts URLs from a given web page.
+    */
   def extractURLs(root: URL, html: String): List[URL] = {
     val pattern = "href=[\"\']([^\"\']+)[\"\']".r
 
@@ -1123,11 +1222,14 @@ object parallel_web_crawler {
         About         -> """<html><body><a href="home.html">Home</a><a href="http://google.com">Google</a></body></html>"""
       )
 
-    val getURL: URL => IO[Exception, String] =
-      (url: URL) =>
-        SiteIndex
-          .get(url)
-          .fold[IO[Exception, String]](IO.fail(new Exception("Could not connect to: " + url)))(IO.effectTotal(_))
+    val TestWeb = new Web {
+      val web = new Web.Service {
+        def getURL(url: URL): IO[Exception, String] =
+          SiteIndex
+            .get(url)
+            .fold[IO[Exception, String]](IO.fail(new Exception("Could not connect to: " + url)))(IO.effectTotal(_))
+      }
+    }
 
     val ScalazRouter: URL => Set[URL] =
       url => if (url.parsed.apexDomain == Some("scalaz.org")) Set(url) else Set()
@@ -1140,4 +1242,59 @@ object parallel_web_crawler {
     (for {
       _ <- putStrLn("Hello World!")
     } yield ()).fold(_ => 1, _ => 0)
+}
+
+object circuit_breaker_v2 extends App {
+  import scalaz.zio.clock._
+
+  /**
+    * EXERCISE 1
+    *
+    * Design an API for the following circuit breaker trait.
+    */
+  trait CircuitBreaker[E] {
+    def apply[R, A](zio: ZIO[R, E, A]): ZIO[R with Clock, E, A]
+  }
+
+  object CircuitBreaker {
+
+    /**
+      * EXERCISE 2
+      *
+      * Design an immutable data structure to hold the state of the circuit
+      * breaker.
+      */
+    private final case class HistogramState()
+
+    /**
+      * EXERCISE 3
+      *
+      * Implement the constructor for `CircuitBreaker`.
+      */
+    def make[E](rejectedError: E, threshold: Double): UIO[CircuitBreaker[E]] =
+      for {
+        ref <- Ref.make(HistogramState())
+        hist = new Histogram(ref, TimeUnit.MINUTES, 2)
+      } yield new CircuitBreaker[E] {
+        def apply[R, A](zio: ZIO[R, E, A]): ZIO[R with Clock, E, A] =
+          for {
+            state     <- ref.get
+            failures  <- hist.failures
+            successes <- hist.successes
+            ratio      = failures.toDouble / successes.toDouble
+            a         <- if (ratio > threshold) ZIO.fail(rejectedError) else currentTime(TimeUnit.MILLISECONDS).flatMap(millis => zio.tapBoth(_ => hist.add(millis, false),
+                                                                                                                                              _ => hist.add(millis, true)))
+          } yield a
+      }
+
+    private class Histogram(ref: Ref[HistogramState], unit: TimeUnit, size: Int) {
+      def add(millis: Long, b: Boolean): UIO[Unit] = ???
+
+      def failures: UIO[Int] = ???
+
+      def successes: UIO[Int] = ???
+    }
+  }
+
+  override def run(args: List[String]): ZIO[Environment, Nothing, Int] = ???
 }
